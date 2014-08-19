@@ -62,14 +62,12 @@ func (beam *structBeam) String() (result string) {
 
 func main() {
 	nodes := createStucture()
-	//fmt.Println("Create Structure Finish")
 	
 	configStructureExample1(nodes)
-	//fmt.Println("Config Structure Finish")
 	
 	printStructure(nodes)
 	
-	analyseStructureJacobi(nodes)
+	analyseStructure(nodes)
 }
 
 //**********************PRINT*********************
@@ -95,12 +93,11 @@ func createStucture() (nodes []structNode) {
 		nodes[i] = *newNode()
 		nodes[i].id = i
 	}
-	//fmt.Println("Nodes Created")
+
 	//connect nodes linearly
 	for i := 0; i < NUM_NODES - 1; i++ {
 		connectNodes(&nodes[i], &nodes[i + 1])
 	}
-	//fmt.Println("Nodes Connected")
 	return
 }
 
@@ -141,15 +138,14 @@ func configStructureExample1(nodes []structNode) {
 
 //*******************ANALYZE STRUCTURE*************
 
-func analyseStructureJacobi(nodes []structNode) {
+func analyseStructure(nodes []structNode) {
 	isFinish := false
 	iteration := 0
 	for !isFinish {
-	//for iteration := 0; iteration < 3; iteration++ {
 		iteration++
 		isFinish = true
-		//for nodeIndex := 0; nodeIndex < len(nodes); nodeIndex++ {
-		for nodeIndex := len(nodes) - 1; nodeIndex >= 0; nodeIndex-- {
+		for nodeIndex := 0; nodeIndex < len(nodes); nodeIndex++ { //normal order
+		//for nodeIndex := len(nodes) - 1; nodeIndex >= 0; nodeIndex-- { //reverse order
 			if !nodes[nodeIndex].isFixed {
 				//calculate amount of unbalance
 				momentSum := float64(0)
