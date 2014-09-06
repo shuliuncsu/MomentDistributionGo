@@ -1,0 +1,41 @@
+package main
+
+import (
+	"fmt"
+	)
+
+func main() {
+	//Set Number of Cores
+	var numCores = flag.Int("n", 4, "number of CPU cores to use")
+	flag.Parse()
+	runtime.GOMAXPROCS(*numCores)
+	
+	filename := "Node1e6_1.txt"
+	
+	//Sequential Version===========================================
+	structure1 := createStructureFromFile(filename)
+	
+	start := time.Now()
+    
+	analyseStructureSequential(structure1)
+	
+    elapsed := time.Since(start)
+    fmt.Printf("Sequential version took %s\n", elapsed)
+	
+	//Parallel Version=========================================
+	structure2 := createStructureFromFile(filename)
+	
+	start = time.Now()
+	
+	analyseStructureAsynchronous(structure2)
+	
+    elapsed = time.Since(start)
+    fmt.Printf("Parallel version took %s\n", elapsed)
+	
+	//Check Correctness========================================
+	if checkStructure(structure1, structure2) {
+		fmt.Println("Same")
+	} else {
+		fmt.Println("Not Same")
+	}
+}

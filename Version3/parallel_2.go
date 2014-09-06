@@ -17,8 +17,9 @@ import (
 const (
 	TOLERANCE = 0.1
 	TOLERANCE_CHECK = 0.2
-	BUFFER_SIZE = 1
-	MAX_NUM_OF_GO_ROUTINE = 1e9
+	BUFFER_SIZE = 2
+	INITIAL_WAIT_TIME = 1
+	SCAN_INTERVAL = 1
 )
 
 type Structure struct {
@@ -29,7 +30,6 @@ type Node struct {
 	id int
 	isFixed bool
 	beams *list.List
-	lock chan bool
 }
 
 func (node *Node) String() (result string) {
@@ -54,9 +54,6 @@ func newNode(id int, isFixed bool) *Node {
 	node.id = id
 	node.isFixed = isFixed
 	node.beams = list.New()
-		
-	node.lock = make(chan bool, 1)
-	node.lock <- true
 		
 	return node
 }
@@ -91,7 +88,7 @@ func main() {
 	flag.Parse()
 	runtime.GOMAXPROCS(*numCores)
 	
-	filename := "Node1e0.txt"
+	filename := "Node1e4.txt"
 	
 	//Sequential Version===========================================
 	structure1 := createStructureFromFile(filename)
@@ -262,98 +259,112 @@ func analyseStructureSequential(structure *Structure) {
 //*******************ANALYZE STRUCTURE PARALLEL****
 
 func analyseStructureAsynchronous(structure *Structure) {
-	count := make(chan bool, MAX_NUM_OF_GO_ROUTINE)
+	finish := make(chan bool, 1)
+	
 	for id, _ := range structure.nodeMap { //default order
-		count <- true
-		go analyseNode(structure, id, count)
+		go analyseNode(structure, id, finish)
 	}
 	
 	All:
 	for {
-		select {
-		case _, ok := <-count:
-			if ok {
-				count <- true
-				time.Sleep(1)
-			} else {
-				fmt.Println("Channel closed!")
-				break
+		time.Sleep(time.Millisecond * SCAN_INTERVAL)
+		
+		isFinish := true
+		
+		Scan:
+		for id, _ := range structure.nodeMap { //default order
+			for e := structure.nodeMap[id].beams.Front(); e != nil; e = e.Next() {
+				beam, _ := e.Value.(*Beam)
+
+				//check pending updated value
+				select {
+				case value, ok := <-beam.buffer:
+					if ok {
+						beam.buffer <- value
+						isFinish = false
+						break Scan
+					}
+				default:
+					break
+				}
 			}
-		default:
+		}
+		
+		if isFinish {
+			close(finish)
 			fmt.Println("Parallel Analyse Finish")
 			break All
 		}
 	}
 }
 
-func analyseNode(structure *Structure, id int, count chan bool) {
-	//check whether current node is running by other go routine
-	select {
-	case _, ok := <- structure.nodeMap[id].lock:
-		if ok {
-			defer func() {structure.nodeMap[id].lock <- true}()
-		} else {
-			fmt.Println("Channel closed!")
-		}
-	// default:
-	// 	<-count
-	// 	return
-	}
-	
-	if !structure.nodeMap[id].isFixed {
-		//calculate amount of unbalance for non-fixed ends
-		momentSum := float64(0)
-		for e := structure.nodeMap[id].beams.Front(); e != nil; e = e.Next() {
-			beam, _ := e.Value.(*Beam)
-
-			//check pending updated value
-			select {
-			case value, ok := <-beam.buffer:
-				if ok {
-					beam.moment += value
-				} else {
-					fmt.Println("Channel closed!")
-					break
+func analyseNode(structure *Structure, id int, finish chan bool) {	
+	AnalyseNode:
+	for {
+		//check whether analyse finish
+		select {
+			case _, ok := <-finish:
+				if !ok {
+					break AnalyseNode
 				}
 			default:
-				break
-			}
-			momentSum += beam.moment
+				break 
 		}
-
-		//redistribute moment and carry over
-		if (math.Abs(momentSum) > TOLERANCE) {
+		
+		if !structure.nodeMap[id].isFixed {
+			//calculate amount of unbalance for non-fixed ends
+			momentSum := float64(0)
 			for e := structure.nodeMap[id].beams.Front(); e != nil; e = e.Next() {
-				beam, _ := e.Value.(*Beam)				
-				increment := - momentSum * beam.df
-				beam.moment += increment
-				beam.otherEndBeam.buffer <- increment * beam.cof
-				
-				//anslyse updated nodes
-				count <- true
-				go analyseNode(structure, beam.otherEndNode.id, count)
-			}
-		}
-	} else {
-		//check updated value for fixed ends
-		for e := structure.nodeMap[id].beams.Front(); e != nil; e = e.Next() {
-			beam, _ := e.Value.(*Beam)
+				beam, _ := e.Value.(*Beam)
 
-			select {
-			case value, ok := <-beam.buffer:
-				if ok {
-					beam.moment += value
-				} else {
-					fmt.Println("Channel closed!")
+				//check pending updated value
+				select {
+				case value, ok := <-beam.buffer:
+					if ok {
+						beam.moment += value
+					} else {
+						fmt.Println("Error: Channel closed!")
+						break
+					}
+				default:
 					break
 				}
-			default:
-				break
+				momentSum += beam.moment
+			}
+
+			//test to create bug
+			//time.Sleep(1 * time.Millisecond)
+
+			//redistribute moment and carry over
+			if (math.Abs(momentSum) > TOLERANCE) {
+				for e := structure.nodeMap[id].beams.Front(); e != nil; e = e.Next() {
+					beam, _ := e.Value.(*Beam)				
+					increment := - momentSum * beam.df
+					beam.moment += increment
+					beam.otherEndBeam.buffer <- increment * beam.cof
+				}
+			}
+		} else {
+			//check updated value for fixed ends
+			for e := structure.nodeMap[id].beams.Front(); e != nil; e = e.Next() {
+				beam, _ := e.Value.(*Beam)
+
+				select {
+				case value, ok := <-beam.buffer:
+					if ok {
+						beam.moment += value
+					} else {
+						fmt.Println("Error: Channel closed!")
+						break
+					}
+				default:
+					break
+				}
 			}
 		}
+		
+		time.Sleep(INITIAL_WAIT_TIME * time.Millisecond)
 	}
-	
-	<-count
 }
 
 //******************CHECK CORRECTNESS****************
