@@ -1,0 +1,6 @@
+NumOfNodes
+NodeID Fix/Non-Fix
+...
+NumOfBeams
+node1 df1 cof1 moment1 node2 df2 cof2 moment2
+...
