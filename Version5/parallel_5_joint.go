@@ -1,7 +1,7 @@
 package main
 
 import (
-	"container/list"
+	//"container/list"
 	"fmt"
 	"bufio"
 	"os"
@@ -16,7 +16,7 @@ import (
 
 const (
 	TOLERANCE = 0.1
-	TOLERANCE_CHECK = 0.5
+	TOLERANCE_CHECK = 0.2
 	BUFFER_SIZE = 20
 )
 
@@ -30,11 +30,12 @@ type Structure struct {
 type Node struct {
 	id int
 	isFixed bool
-	beams *list.List
+	ends map[int] *End
+	buffer chan *Update
 }
 
 func (node *Node) String() (result string) {
-	result = fmt.Sprintf("Node id: %d, num of beams: %d", node.id, node.beams.Len())
+	result = fmt.Sprintf("Node id: %d, num of ends: %d", node.id, len(node.ends))
 	
 	if node.isFixed {
 		result += ", Fix"
@@ -42,36 +43,51 @@ func (node *Node) String() (result string) {
 		result += ", Non-fix"
 	}
 	
-	for e := node.beams.Front(); e != nil; e = e.Next() {
-		beam, _ := e.Value.(*Beam)
-		result += "\n\t" + beam.String()
+	for _, end := range node.ends {
+		result += "\n\t" + end.String()
 	}
 	return result
 }
+
+func (node *Node) addEnd(end *End) (endIndex int) {
+	endIndex = len(node.ends);
+	node.ends[endIndex] = end;
+	return endIndex;
+} 
 
 func newNode(id int, isFixed bool) *Node {
 	node := new(Node)
 	
 	node.id = id
 	node.isFixed = isFixed
-	node.beams = list.New()	
-		
+	node.ends = make(map[int]*End)
+	node.buffer = make(chan *Update, BUFFER_SIZE)
 	return node
 }
 
-type Beam struct {
-	id int
-	otherEndNode *Node
-	otherEndBeam *Beam
-	df float64
-	cof float64 //cof to the other end
-	moment float64
-	buffer chan float64
+type Update struct {
+	carryover float64
+	endIndex int
 }
 
-func (beam *Beam) String() (result string) {
-	result = fmt.Sprintf("Beam id: %d\t OtherEndNode: %d df: %.2f cof: %.2f moment: %.1f",
-	beam.id, beam.otherEndNode.id, beam.df, beam.cof, beam.moment)
+func newUpdate(endIndex int, carryover float64) *Update {
+	update := new(Update)
+	
+	update.endIndex = endIndex
+	update.carryover = carryover
+	
+	return update
+}
+
+type End struct {
+	otherEndNodeID int
+	otherEndIndex int
+	df float64
+	moment float64
+}
+
+func (end *End) String() (result string) {
+	result = fmt.Sprintf("End df: %.2f moment: %.1f", end.df, end.moment)
 	return result
 }
 
@@ -89,11 +105,10 @@ func main() {
 	flag.Parse()
 	runtime.GOMAXPROCS(*numCores)
 	
-	filename := "Node1e3.txt"
+	filename := "Node1e4.txt"
 	
 	//Sequential Version===========================================
 	structure1 := createStructureFromFile(filename)
-	
 	start := time.Now()
     
 	analyseStructureSequential(structure1)
@@ -103,13 +118,15 @@ func main() {
 	
 	//Parallel Version=========================================
 	structure2 := createStructureFromFile(filename)
-	
+
 	start = time.Now()
-	
-	analyseStructureSynchronous(structure2)
-	
+
+	analyseStructureAsynchronous(structure2)
+
 	elapsed = time.Since(start)
 	fmt.Printf("Parallel version took %s\n", elapsed)
+	
+	//printStructure(structure2)
 	
 	//Check Correctness========================================
 	if checkStructure(structure1, structure2) {
@@ -129,7 +146,7 @@ func createStructureFromFile(filename string) (structure *Structure) {
 		return // exit the function on error
 	}
 	defer inputFile.Close()
-	scanner := bufio.NewScanner(inputFile) //bufio.NewReader(inputFile))
+	scanner := bufio.NewScanner(inputFile) 
 	scanner.Split(bufio.ScanWords)
 	
 	structure = new(Structure)
@@ -148,18 +165,18 @@ func createStructureFromFile(filename string) (structure *Structure) {
 		structure.nodeMap[id] = *newNode(id, isFixed)
 	}
 	
-	//read number of beams
+	//read number of ends
 	scanner.Scan()
-	numBeams, _ := strconv.Atoi(scanner.Text())
+	numEnds, _ := strconv.Atoi(scanner.Text())
 		
-	//read beams
-	for i := 0; i < numBeams; i++ {
+	//read ends
+	for i := 0; i < numEnds; i++ {
 		scanner.Scan()
 		id1, _ := strconv.Atoi(scanner.Text())
 		scanner.Scan()
 		df1, _ := strconv.ParseFloat(scanner.Text(), 64)
 		scanner.Scan()
-		cof1, _ := strconv.ParseFloat(scanner.Text(), 64)
+		//_ := strconv.ParseFloat(scanner.Text(), 64)
 		scanner.Scan()
 		moment1, _ := strconv.ParseFloat(scanner.Text(), 64)
 		scanner.Scan()
@@ -167,11 +184,11 @@ func createStructureFromFile(filename string) (structure *Structure) {
 		scanner.Scan()
 		df2, _ := strconv.ParseFloat(scanner.Text(), 64)
 		scanner.Scan()
-		cof2, _ := strconv.ParseFloat(scanner.Text(), 64)
+		//_ := strconv.ParseFloat(scanner.Text(), 64)
 		scanner.Scan()
 		moment2, _ := strconv.ParseFloat(scanner.Text(), 64)
 		
-		connectNodes(structure, id1, df1, cof1, moment1, id2, df2, cof2, moment2)
+		connectNodes(structure, id1, df1, moment1, id2, df2, moment2)
 	}
 	
 	normalizeStructure(structure)
@@ -179,43 +196,35 @@ func createStructureFromFile(filename string) (structure *Structure) {
 	return
 }
 
-func connectNodes(structure *Structure, id1 int, df1 float64, cof1 float64, moment1 float64, id2 int, df2 float64, cof2 float64, moment2 float64) {
+func connectNodes(structure *Structure, id1 int, df1 float64, moment1 float64, id2 int, df2 float64, moment2 float64) {
 	node1 := structure.nodeMap[id1]
-	beam1 := new(Beam)
+	end1 := new(End)
+	
 	node2 := structure.nodeMap[id2]
-	beam2 := new(Beam)
+	end2 := new(End)
 	
-	beam1.df = df1
-	beam1.cof = cof1
-	beam1.moment = moment1
-	beam1.otherEndNode = &node2
-	beam1.otherEndBeam = beam2
-	beam1.buffer = make(chan float64, BUFFER_SIZE)
+	end1.df = df1
+	end1.moment = moment1
+	end1.otherEndNodeID = id2
+	end1.otherEndIndex = node2.addEnd(end2)
 	
-	beam2.df = df2
-	beam2.cof = cof2
-	beam2.moment = moment2
-	beam2.otherEndNode = &node1
-	beam2.otherEndBeam = beam1
-	beam2.buffer = make(chan float64, BUFFER_SIZE)
-	
-	node1.beams.PushBack(beam1)
-	node2.beams.PushBack(beam2)
+	end2.df = df2
+	end2.moment = moment2
+	end2.otherEndNodeID = id1
+	end2.otherEndIndex = node1.addEnd(end1)
 }
 
 func normalizeStructure(structure *Structure) {
 	for id, node := range structure.nodeMap { //default order
-		if node.beams.Len() > 0 {//!node.isFixed {
+		if len(node.ends) > 0 {
 			//normalize df
 			dfSum := float64(0)
-			for e := node.beams.Front(); e != nil; e = e.Next() {
-				beam, _ := e.Value.(*Beam)
-				dfSum += beam.df
+			for _, end := range node.ends {
+				dfSum += end.df
 			}
 			
-			for e := node.beams.Front(); e != nil; e = e.Next() {	
-				beam, _ := e.Value.(*Beam)
-				beam.df /= dfSum
+			for _, end := range node.ends {
+				end.df /= dfSum
 			}
 		} else {
 			delete(structure.nodeMap, id)
@@ -232,23 +241,38 @@ func analyseStructureSequential(structure *Structure) {
 		iteration++
 		isFinish = true
 		for _, node := range structure.nodeMap { //default order
+			moreUpdate := true
+			for moreUpdate {
+				//check pending updated value
+					select {
+					case update, ok := <-node.buffer:
+						if ok {
+							node.ends[update.endIndex].moment += update.carryover
+						} else {
+							fmt.Println("Error: Channel closed!")
+							break
+						}
+					default:
+						moreUpdate = false
+						break
+				}
+			}
+			
 			if !node.isFixed {
 				//calculate amount of unbalance
 				momentSum := float64(0)
-				for e := node.beams.Front(); e != nil; e = e.Next() {
-					beam, _ := e.Value.(*Beam)
-					momentSum += beam.moment
+				for _, end := range node.ends {
+					momentSum += end.moment
 				}
 
 				//redistribute moment and carry over
 				if (math.Abs(momentSum) > TOLERANCE) {
 					isFinish = false
 
-					for e := node.beams.Front(); e != nil; e = e.Next() {
-						beam, _ := e.Value.(*Beam)				
-						increment := - momentSum * beam.df
-						beam.moment += increment
-						beam.otherEndBeam.moment += increment * beam.cof
+					for _, end := range node.ends {			
+						increment := - momentSum * end.df
+						end.moment += increment
+						structure.nodeMap[end.otherEndNodeID].buffer <- newUpdate(end.otherEndIndex, increment * 0.5)
 					}
 				}
 			}
@@ -259,24 +283,25 @@ func analyseStructureSequential(structure *Structure) {
 
 //*******************ANALYZE STRUCTURE PARALLEL****
 
-func analyseStructureSynchronous(structure *Structure) {
+func analyseStructureAsynchronous(structure *Structure) {
 	idSets := make([]map[int]bool, 4)
 	idSets[0] = make(map[int]bool)
 	idSets[1] = make(map[int]bool)
 	idSets[2] = make(map[int]bool)
 	idSets[3] = make(map[int]bool)
-	//rotate := 0
-	
-	//start running
+	rotate := 0
+
+	//assign nodes to threads
 	for id, _ := range structure.nodeMap {
-		idSets[0][id] = true
-		//rotate = (rotate + 1) % 4
+		idSets[rotate][id] = true
+		rotate = (rotate + 1) % 4
 	}
-	
+
+	//start parallel analysis
 	for i := 0; i < 4; i++ {
-		go analyseNode(structure, idSets[0])
+		go analyseNode(structure, idSets[i])
 	}
-	
+
 	All:
 	for {
 		//time.Sleep(1 * time.Millisecond)
@@ -288,27 +313,23 @@ func analyseStructureSynchronous(structure *Structure) {
 				}
 			}
 		}
-		
+
 		isFinish := true
 		Scan:
-		for id, _ := range structure.nodeMap { //default order
-			for e := structure.nodeMap[id].beams.Front(); e != nil; e = e.Next() {
-				beam, _ := e.Value.(*Beam)
-
-				//check pending updated value
-				select {
-				case value, ok := <-beam.buffer:
-					if ok {
-						beam.buffer <- value
-						isFinish = false
-						break Scan
-					}
-				default:
-					break
+		for _, node := range structure.nodeMap { //default order
+			//check pending updated value
+			select {
+			case value, ok := <-node.buffer:
+				if ok {
+					node.buffer <- value
+					isFinish = false
+					break Scan
 				}
+			default:
+				break
 			}
 		}
-		
+
 		if isFinish {
 			close(FINISH_CHANNEL)
 			fmt.Println("Parallel Analyse Finish")
@@ -317,7 +338,7 @@ func analyseStructureSynchronous(structure *Structure) {
 	}
 }
 
-func analyseNode(structure *Structure, idSet map[int]bool) {	
+func analyseNode(structure *Structure, idSet map[int]bool) {
 	AnalyseNode:
 	for {
 		//check whether analyse finish
@@ -329,53 +350,40 @@ func analyseNode(structure *Structure, idSet map[int]bool) {
 		default:
 			break
 		}
-		
+
 		for id, _ := range idSet {
-			if !structure.nodeMap[id].isFixed {
-				//calculate amount of unbalance for non-fixed ends
-				momentSum := float64(0)
-				for e := structure.nodeMap[id].beams.Front(); e != nil; e = e.Next() {
-					beam, _ := e.Value.(*Beam)
+			node := structure.nodeMap[id]
 
-					//check pending updated value
+			moreUpdate := true
+			for moreUpdate {
+				//check pending updated value
 					select {
-					case value, ok := <-beam.buffer:
+					case update, ok := <-node.buffer:
 						if ok {
-							beam.moment += value
-						} else {
-							fmt.Println("Error: Channel closed!")
-							break
-						}
-						//default:
-						//break
-					}
-					momentSum += beam.moment
-				}
-
-				//redistribute moment and carry over
-				if (math.Abs(momentSum) > TOLERANCE) {
-					for e := structure.nodeMap[id].beams.Front(); e != nil; e = e.Next() {
-						beam, _ := e.Value.(*Beam)				
-						increment := - momentSum * beam.df
-						beam.moment += increment
-						beam.otherEndBeam.buffer <- increment * beam.cof
-					}
-				}
-			} else {
-				//check updated value for fixed ends
-				for e := structure.nodeMap[id].beams.Front(); e != nil; e = e.Next() {
-					beam, _ := e.Value.(*Beam)
-
-					select {
-					case value, ok := <-beam.buffer:
-						if ok {
-							beam.moment += value
+							node.ends[update.endIndex].moment += update.carryover
 						} else {
 							fmt.Println("Error: Channel closed!")
 							break
 						}
 					default:
+						moreUpdate = false
 						break
+				}
+			}
+
+			if !node.isFixed {
+				//calculate amount of unbalance for non-fixed ends
+				momentSum := float64(0)
+				for _, end := range structure.nodeMap[id].ends {
+					momentSum += end.moment
+				}
+
+				//redistribute moment and carry over
+				if (math.Abs(momentSum) > TOLERANCE) {
+					for _, end := range structure.nodeMap[id].ends {
+						increment := - momentSum * end.df
+						end.moment += increment
+						structure.nodeMap[end.otherEndNodeID].buffer <- newUpdate(end.otherEndIndex, increment * 0.5)
 					}
 				}
 			}
@@ -394,17 +402,15 @@ func checkStructure(structure1, structure2 *Structure) (isSame bool) {
 		node1 := structure1.nodeMap[id]
 		node2 := structure2.nodeMap[id]
 		
-		e2 := node2.beams.Front()
-		for e1 := node1.beams.Front(); e1 != nil; e1 = e1.Next() {
-			moment1 := e1.Value.(*Beam).moment
-			moment2 := e2.Value.(*Beam).moment
+		for endIndex, _ := range node1.ends {
+			moment1 := node1.ends[endIndex].moment
+			moment2 := node2.ends[endIndex].moment
 			if (math.Abs(moment1 - moment2) > TOLERANCE_CHECK) {
 				fmt.Println(node1.String())
 				fmt.Println(node2.String())
 				isSame = false //return
 				break
 			}
-			e2 = e2.Next()
 		}
 	}
 	return isSame
